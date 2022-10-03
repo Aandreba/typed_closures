@@ -1,8 +1,8 @@
-#![feature(result_option_inspect)]
+#![feature(unzip_option, result_option_inspect)]
 mod utils;
 
-use std::{ops::{Deref, DerefMut}, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
-use syn::{punctuated::Punctuated, ItemTrait, TraitItem, TraitItemType, TypeImplTrait, ItemImpl, parse::Parse, Token, Attribute, ImplItem, ImplItemMethod};
+use std::{ops::{Deref, DerefMut}, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, hint::unreachable_unchecked};
+use syn::{punctuated::Punctuated, ItemTrait, TraitItem, ItemImpl, parse::Parse, Token, Attribute, ImplItem, ImplItemMethod, Receiver, ImplItemType, parse_quote_spanned};
 use proc_macro2::{TokenStream, Span};
 use quote::{quote, format_ident, quote_spanned, ToTokens};
 use syn::{parse_macro_input, ItemFn, Signature, ReturnType, spanned::Spanned, FnArg, GenericParam, Type, LifetimeDef, parse_quote};
@@ -74,7 +74,9 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
     quote! {
         #og_item
 
+        #[repr(C)]
         #vis struct #name #generic_impl #generic_where {
+            _align: <::typed_closures::marker::AlignSelector<{::typed_closures::output_align(&#ident)}> as ::typed_closures::marker::Alignment>::Equivalent,
             fut: [u8; ::typed_closures::output_size(&#ident)],
             _lt: ::core::marker::PhantomData<(#(#phtms),*)>,
             _phtm: ::core::marker::PhantomPinned
@@ -85,6 +87,7 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
             #vis #constness #unsafety fn new (#inputs) -> Self {
                 let fut = #ident (#(#args),*);
                 return Self {
+                    _align: <::typed_closures::marker::AlignSelector<{::typed_closures::output_align(&#ident)}> as ::typed_closures::marker::Alignment>::new(),
                     fut: unsafe { ::core::mem::transmute(fut) },
                     _lt: ::core::marker::PhantomData,
                     _phtm: ::core::marker::PhantomPinned
@@ -169,7 +172,16 @@ fn async_trait_def (mut item: ItemTrait) -> proc_macro::TokenStream {
 }
 
 fn async_trait_impl (mut item: ItemImpl) -> proc_macro::TokenStream {
+    let self_ty = &item.self_ty;
     let mut extra = TokenStream::default();
+    let mut type_impls = Vec::<ImplItem>::with_capacity(1);
+
+    let mod_hash = {
+        let mut hasher = DefaultHasher::default();
+        self_ty.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mod_name = format_ident!("{}__{mod_hash}", self_ty.to_token_stream().to_string());
 
     for impl_item in item.items.iter_mut() {
         if let ImplItem::Method(method) = impl_item {
@@ -183,7 +195,35 @@ fn async_trait_impl (mut item: ItemImpl) -> proc_macro::TokenStream {
                 hasher.finish()
             };
 
-            let target = format_ident!("{}__{hash}__{}", item.self_ty.to_token_stream().to_string(), ident);
+            let args = inputs.iter().map(|arg| match arg {
+                FnArg::Receiver(ty) => ty.self_token.to_token_stream(),
+                FnArg::Typed(ty) => ty.pat.to_token_stream()
+            }).collect::<Vec<_>>();
+
+            let future_inputs = {
+                let mut cloned = inputs.clone();
+                for arg in cloned.iter_mut() {
+                    if let FnArg::Receiver(_) = arg {
+                        unsafe {
+                            let Receiver { attrs, reference, mutability, .. } = match core::ptr::read(arg) {
+                                FnArg::Receiver(recv) => recv,
+                                _ => unreachable_unchecked()
+                            };
+                            let (and, lt) = reference.unzip();
+                            let src = parse_quote! { #(#attrs)* this: #and #lt #mutability #self_ty };
+                            core::ptr::write(arg, src);
+                        }
+                        break;
+                    }
+                }
+                cloned
+            };
+            
+            let target_name = format!("{}__{hash}__{}", item.self_ty.to_token_stream().to_string(), ident);
+            let target = format_ident!("{}", target_name);
+            let target_pascal = format_ident!("{}", to_pascal_case(&target_name));
+            let output_ident = format_ident!("{}", to_pascal_case(&ident.to_string()));
+
             let mut generics = generics.clone();
             generics.params.extend(item.generics.params.iter().cloned());
             generics.make_where_clause().predicates.extend(item.generics.make_where_clause().predicates.iter().cloned());
@@ -192,17 +232,26 @@ fn async_trait_impl (mut item: ItemImpl) -> proc_macro::TokenStream {
             extra.extend(quote! {
                 #[::typed_closures::sized_future]
                 #[doc(hidden)]
-                #constness #asyncness #unsafety #abi #fn_token #target #impl_generics (#inputs) #where_generics #block
+                pub #constness #asyncness #unsafety #abi #fn_token #target #impl_generics (#future_inputs) #output #where_generics #block
             });
 
-            method.sig.asyncness = None;
+            type_impls.push(ImplItem::Type(parse_quote! { type #output_ident = #target_pascal; }));
+            sig.output = ReturnType::Type(Default::default(), Box::new(parse_quote! { Self::#output_ident }));
+            sig.asyncness = None;
+            method.block = parse_quote! {{
+                return #target_pascal::new(#(#args),*)
+            }};
+
             //todo!()
         }
     }
 
+    item.items.extend(type_impls);
+
     quote! {
+        mod #mod_name { #extra }
+        pub use #mod_name::*;
         #item
-        #extra
     }.into()
 }
 

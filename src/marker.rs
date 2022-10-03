@@ -1,6 +1,41 @@
 mod sealed { pub trait Sealed {} }
 use sealed::Sealed;
 
+// ALIGNMENT
+pub trait Alignment: Sealed {
+    type Equivalent;
+    fn new () -> Self::Equivalent;
+}
+pub struct AlignSelector<const ALIGN: usize>;
+impl<const ALIGN: usize> Sealed for AlignSelector<ALIGN> {}
+
+macro_rules! impl_align {
+    ($($name:ident => $align:literal),+) => {
+        $(
+            #[repr(align($align))]
+            pub struct $name;
+
+            impl const Alignment for AlignSelector<$align> {
+                type Equivalent = $name;
+                
+                #[inline(always)]
+                fn new () -> Self::Equivalent { $name }
+            }
+        )+
+    };
+}
+
+impl_align! {
+    Align1 => 1,
+    Align2 => 2,
+    Align4 => 4,
+    Align8 => 8,
+    Align16 => 16,
+    Align32 => 32,
+    Align64 => 64
+}
+
+// CONDITIONS
 pub struct Condition<const VALUE: bool>;
 pub trait IsTrue: Sealed {}
 pub trait IsFalse: Sealed {}
