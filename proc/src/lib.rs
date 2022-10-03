@@ -2,7 +2,7 @@
 mod utils;
 
 use std::{ops::{Deref, DerefMut}, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, hint::unreachable_unchecked};
-use syn::{punctuated::Punctuated, ItemTrait, TraitItem, ItemImpl, parse::Parse, Token, Attribute, ImplItem, ImplItemMethod, Receiver, ImplItemType, parse_quote_spanned};
+use syn::{punctuated::Punctuated, ItemTrait, TraitItem, ItemImpl, parse::Parse, Token, Attribute, ImplItem, ImplItemMethod, Receiver};
 use proc_macro2::{TokenStream, Span};
 use quote::{quote, format_ident, quote_spanned, ToTokens};
 use syn::{parse_macro_input, ItemFn, Signature, ReturnType, spanned::Spanned, FnArg, GenericParam, Type, LifetimeDef, parse_quote};
@@ -13,7 +13,7 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
     let og_item = TokenStream::from(item.clone());
     let ItemFn { attrs, vis, sig, block } = parse_macro_input!(item as ItemFn);
     let Signature { constness, asyncness, unsafety, abi, fn_token, ident, mut generics, paren_token, mut inputs, variadic, output } = sig;
-    
+
     // Add future lifetimes
     let mut c = 'a'..='z';
     let mut phtms = Vec::<Type>::new();
@@ -55,7 +55,7 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
                     });
 
                     cloned.predicates.push(parse_quote! {
-                        ::typed_closures::marker::Condition<{::typed_closures::$fn(&#ident)}>: ::typed_closures::marker::IsTrue
+                        ::typed_closures::marker::Condition<{::typed_closures::$fn(&#ident)}>: ::typed_closures::marker::IsFalse
                     });
 
                     cloned
@@ -79,18 +79,28 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
             _align: <::typed_closures::marker::AlignSelector<{::typed_closures::output_align(&#ident)}> as ::typed_closures::marker::Alignment>::Equivalent,
             fut: [u8; ::typed_closures::output_size(&#ident)],
             _lt: ::core::marker::PhantomData<(#(#phtms),*)>,
-            _phtm: ::core::marker::PhantomPinned
+            _send: ::typed_closures::marker::PhantomSend<{::typed_closures::output_is_send(&#ident)}>,
+            _sync: ::typed_closures::marker::PhantomSync<{::typed_closures::output_is_sync(&#ident)}>,
+            _unwind: ::typed_closures::marker::PhantomUnwind<{::typed_closures::output_is_unwind_safe(&#ident)}>,
+            _ref_unwind: ::typed_closures::marker::PhantomRefUnwind<{::typed_closures::output_is_ref_unwind_safe(&#ident)}>,
+            _unpin: ::core::marker::PhantomPinned
         }
 
         impl #generic_impl #name #generic_ty #generic_where {
             #[inline(always)]
             #vis #constness #unsafety fn new (#inputs) -> Self {
                 let fut = #ident (#(#args),*);
+                debug_assert_eq!(::core::alloc::Layout::for_value(&fut), ::core::alloc::Layout::new::<Self>());
+
                 return Self {
                     _align: <::typed_closures::marker::AlignSelector<{::typed_closures::output_align(&#ident)}> as ::typed_closures::marker::Alignment>::new(),
                     fut: unsafe { ::core::mem::transmute(fut) },
                     _lt: ::core::marker::PhantomData,
-                    _phtm: ::core::marker::PhantomPinned
+                    _send: ::typed_closures::marker::PhantomSend,
+                    _sync: ::typed_closures::marker::PhantomSync,
+                    _unwind: ::typed_closures::marker::PhantomUnwind,
+                    _ref_unwind: ::typed_closures::marker::PhantomRefUnwind,
+                    _unpin: ::core::marker::PhantomPinned
                 };
             }
 
@@ -132,11 +142,6 @@ pub fn sized_future (_: proc_macro::TokenStream, item: proc_macro::TokenStream) 
                 }
             }
         }
-
-        unsafe impl #generic_impl ::core::marker::Send for #name #generic_ty #send_where {}
-        unsafe impl #generic_impl ::core::marker::Sync for #name #generic_ty #sync_where {}
-        impl #generic_impl ::core::panic::UnwindSafe for #name #generic_ty #unwind_safe_where {}
-        impl #generic_impl ::core::panic::RefUnwindSafe for #name #generic_ty #ref_unwind_safe_where {}
     }.into()
 }
 
@@ -227,15 +232,15 @@ fn async_trait_impl (mut item: ItemImpl) -> proc_macro::TokenStream {
             let mut generics = generics.clone();
             generics.params.extend(item.generics.params.iter().cloned());
             generics.make_where_clause().predicates.extend(item.generics.make_where_clause().predicates.iter().cloned());
-            let (impl_generics, _, where_generics) = generics.split_for_impl();
+            let (impl_generics, ty_generics, where_generics) = generics.split_for_impl();
 
             extra.extend(quote! {
                 #[::typed_closures::sized_future]
                 #[doc(hidden)]
-                pub #constness #asyncness #unsafety #abi #fn_token #target #impl_generics (#future_inputs) #output #where_generics #block
+                pub(super) #constness #asyncness #unsafety #abi #fn_token #target #impl_generics (#future_inputs) #output #where_generics #block
             });
 
-            type_impls.push(ImplItem::Type(parse_quote! { type #output_ident = #target_pascal; }));
+            type_impls.push(ImplItem::Type(parse_quote! { type #output_ident = #target_pascal #ty_generics; }));
             sig.output = ReturnType::Type(Default::default(), Box::new(parse_quote! { Self::#output_ident }));
             sig.asyncness = None;
             method.block = parse_quote! {{
@@ -249,7 +254,13 @@ fn async_trait_impl (mut item: ItemImpl) -> proc_macro::TokenStream {
     item.items.extend(type_impls);
 
     quote! {
-        mod #mod_name { #extra }
+        #[doc(hidden)]
+        mod #mod_name { 
+            use super::*;
+            #extra
+        }
+
+        #[doc(hidden)]
         pub use #mod_name::*;
         #item
     }.into()

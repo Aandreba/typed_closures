@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(unboxed_closures, const_trait_impl, specialization)]
+#![feature(unboxed_closures, const_trait_impl, negative_impls, specialization)]
 
 use marker::{IsSend, IsSync, IsUnwindSafe, IsRefUnwindSafe};
 pub use typed_closures_proc::*;

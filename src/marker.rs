@@ -45,8 +45,11 @@ impl IsFalse for Condition<false> {}
 impl<const VALUE: bool> Sealed for Condition<VALUE> {}
 
 macro_rules! is_trait {
-    ($($trait:path as $name:ident => $fn:ident),+) => {
+    ($($trait:path as $phtm:ident + $name:ident => $fn:ident),+) => {
         $(
+            pub struct $phtm<const V: bool>;
+            impl !$trait for $phtm<false> {}
+
             pub trait $name {
                 fn $fn () -> bool;
             }
@@ -65,8 +68,8 @@ macro_rules! is_trait {
 }
 
 is_trait! {
-    Send as IsSend => is_send,
-    Sync as IsSync => is_sync,
-    core::panic::UnwindSafe as IsUnwindSafe => is_unwind_safe,
-    core::panic::RefUnwindSafe as IsRefUnwindSafe => is_ref_unwind_safe
+    Send as PhantomSend + IsSend => is_send,
+    Sync as PhantomSync + IsSync => is_sync,
+    core::panic::UnwindSafe as PhantomUnwind + IsUnwindSafe => is_unwind_safe,
+    core::panic::RefUnwindSafe as PhantomRefUnwind + IsRefUnwindSafe => is_ref_unwind_safe
 }

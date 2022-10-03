@@ -1,3 +1,6 @@
+use quote::{format_ident, ToTokens};
+use syn::*;
+
 pub fn to_pascal_case (s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut is_upper = true;
